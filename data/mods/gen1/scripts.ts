@@ -17,8 +17,9 @@ export const Scripts: ModdedBattleScriptsData = {
 	gen: 1,
 	init() {
 		for (const i in this.data.Pokedex) {
-			(this.data.Pokedex[i] as any).gender = 'N';
-			(this.data.Pokedex[i] as any).eggGroups = null;
+			const poke = this.modData('Pokedex', i);
+			poke.gender = 'N';
+			poke.eggGroups = null;
 		}
 	},
 	// BattlePokemon scripts.
@@ -92,16 +93,18 @@ export const Scripts: ModdedBattleScriptsData = {
 						changed = true;
 					}
 				}
-				// Recalculate the modified stat
-				this.modifiedStats![i] = this.storedStats[i];
-				if (this.boosts[i] >= 0) {
-					this.modifyStat!(i, [1, 1.5, 2, 2.5, 3, 3.5, 4][this.boosts[i]]);
-				} else {
-					this.modifyStat!(i, [100, 66, 50, 40, 33, 28, 25][-this.boosts[i]] / 100);
-				}
-				if (delta > 0 && this.modifiedStats![i] > 999) {
-					// Cap the stat at 999
-					this.modifiedStats![i] = 999;
+				if (changed) {
+					// Recalculate the modified stat
+					this.modifiedStats![i] = this.storedStats[i];
+					if (this.boosts[i] >= 0) {
+						this.modifyStat!(i, [1, 1.5, 2, 2.5, 3, 3.5, 4][this.boosts[i]]);
+					} else {
+						this.modifyStat!(i, [100, 66, 50, 40, 33, 28, 25][-this.boosts[i]] / 100);
+					}
+					if (delta > 0 && this.modifiedStats![i] > 999) {
+						// Cap the stat at 999
+						this.modifiedStats![i] = 999;
+					}
 				}
 			}
 			return changed;
@@ -120,9 +123,22 @@ export const Scripts: ModdedBattleScriptsData = {
 		// This function is the main one when running a move.
 		// It deals with the beforeMove event.
 		// It also deals with how PP reduction works on gen 1.
-		runMove(moveOrMoveName, pokemon, targetLoc, sourceEffect) {
+		runMove(moveOrMoveName, pokemon, targetLoc, options) {
+			let sourceEffect = options?.sourceEffect;
 			const target = this.battle.getTarget(pokemon, moveOrMoveName, targetLoc);
-			const move = this.battle.dex.getActiveMove(moveOrMoveName);
+			let move = this.battle.dex.getActiveMove(moveOrMoveName);
+
+			// If a faster partial trapping move misses against a user of Hyper Beam during a recharge turn,
+			// the user of Hyper Beam will automatically use Hyper Beam during that turn.
+			const autoHyperBeam = (
+				move.id === 'recharge' && !pokemon.volatiles['mustrecharge'] && !pokemon.volatiles['partiallytrapped']
+			);
+			if (autoHyperBeam) {
+				move = this.battle.dex.getActiveMove('hyperbeam');
+				this.battle.hint(`In Gen 1, If a faster partial trapping move misses against a user of Hyper Beam during a recharge turn, ` +
+					`the user of Hyper Beam will automatically use Hyper Beam during that turn.`, true);
+			}
+
 			if (target?.subFainted) target.subFainted = null;
 
 			this.battle.setActiveMove(move, pokemon, target);
@@ -153,14 +169,17 @@ export const Scripts: ModdedBattleScriptsData = {
 					pokemon.deductPP(pokemon.volatiles['twoturnmove'].originalMove, null, target);
 				}
 			}
-			if (pokemon.volatiles['partialtrappinglock'] && target !== pokemon.volatiles['partialtrappinglock'].locked) {
+			if (
+				(pokemon.volatiles['partialtrappinglock'] && target !== pokemon.volatiles['partialtrappinglock'].locked) ||
+				autoHyperBeam
+			) {
 				const moveSlot = pokemon.moveSlots.find(ms => ms.id === move.id);
 				if (moveSlot && moveSlot.pp < 0) {
 					moveSlot.pp = 63;
 					this.battle.hint("In Gen 1, if a player is forced to use a move with 0 PP, the move will underflow to have 63 PP.");
 				}
 			}
-			this.useMove(move, pokemon, target, sourceEffect);
+			this.useMove(move, pokemon, {target, sourceEffect});
 			// Restore PP if the move is the first turn of a charging move. Save the move from which PP should be deducted if the move succeeds.
 			if (pokemon.volatiles['twoturnmove']) {
 				pokemon.deductPP(move, -1, target);
@@ -169,7 +188,9 @@ export const Scripts: ModdedBattleScriptsData = {
 		},
 		// This function deals with AfterMoveSelf events.
 		// This leads with partial trapping moves shenanigans after the move has been used.
-		useMove(moveOrMoveName, pokemon, target, sourceEffect) {
+		useMove(moveOrMoveName, pokemon, options) {
+			let sourceEffect = options?.sourceEffect;
+			let target = options?.target;
 			if (!sourceEffect && this.battle.effect.id) sourceEffect = this.battle.effect;
 			const baseMove = this.battle.dex.moves.get(moveOrMoveName);
 			let move = this.battle.dex.getActiveMove(baseMove);
@@ -192,7 +213,7 @@ export const Scripts: ModdedBattleScriptsData = {
 			// The charging turn of a two-turn move does not update pokemon.lastMove
 			if (!TWO_TURN_MOVES.includes(move.id) || pokemon.volatiles['twoturnmove']) pokemon.lastMove = move;
 
-			const moveResult = this.useMoveInner(moveOrMoveName, pokemon, target, sourceEffect);
+			const moveResult = this.useMoveInner(moveOrMoveName, pokemon, {target, sourceEffect});
 
 			if (move.id !== 'metronome') {
 				if (move.id !== 'mirrormove' ||
@@ -238,7 +259,9 @@ export const Scripts: ModdedBattleScriptsData = {
 		},
 		// This is the function that actually uses the move, running ModifyMove events.
 		// It uses the move and then deals with the effects after the move.
-		useMoveInner(moveOrMoveName, pokemon, target, sourceEffect) {
+		useMoveInner(moveOrMoveName, pokemon, options) {
+			let sourceEffect = options?.sourceEffect;
+			let target = options?.target;
 			if (!sourceEffect && this.battle.effect.id) sourceEffect = this.battle.effect;
 			const baseMove = this.battle.dex.moves.get(moveOrMoveName);
 			let move = this.battle.dex.getActiveMove(baseMove);
@@ -375,7 +398,7 @@ export const Scripts: ModdedBattleScriptsData = {
 
 			// OHKO moves only have a chance to hit if the user is at least as fast as the target
 			if (move.ohko) {
-				if (target.speed > pokemon.speed) {
+				if (target.getStat('spe') > pokemon.getStat('spe')) {
 					this.battle.add('-immune', target, '[ohko]');
 					return false;
 				}
@@ -748,7 +771,7 @@ export const Scripts: ModdedBattleScriptsData = {
 			}
 
 			// If there's a fix move damage, we return that.
-			if (move.damage) {
+			if (move.damage || move.damage === 0) {
 				return move.damage;
 			}
 
@@ -901,7 +924,8 @@ export const Scripts: ModdedBattleScriptsData = {
 			// Type effectiveness.
 			// In Gen 1, type effectiveness is applied against each of the target's types.
 			for (const targetType of target.types) {
-				const typeMod = this.battle.dex.getEffectiveness(type, targetType);
+				let typeMod = this.battle.dex.getEffectiveness(type, targetType);
+				typeMod = this.battle.runEvent('Effectiveness', this.battle, targetType, move, typeMod);
 				if (typeMod > 0) {
 					// Super effective against targetType
 					damage *= 20;
